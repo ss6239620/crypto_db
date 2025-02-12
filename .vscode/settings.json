@@ -1,0 +1,13 @@
+{
+    "files.associations": {
+        "atomic": "c",
+        "cstdint": "c",
+        "random": "c",
+        "*.tcc": "c",
+        "fcntl.h": "c",
+        "string": "c",
+        "streambuf": "c",
+        "stdio.h": "c",
+        "string.h": "c"
+    }
+}

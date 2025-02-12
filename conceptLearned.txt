@@ -1,0 +1,64 @@
+Void Pointer:
+    A void * (void pointer) is a special type of pointer in C and C++ that can hold the address of any data type. It is often used for generic programming, where the type of the object being pointed to is not known in advance.
+
+    example:
+            int a = 10;
+            void *ptr = &a; // Void pointer can hold address of any type
+
+typedef:
+    The typedef is a keyword that is used to provide existing data types with a new name. The C typedef keyword is used to redefine the name of already existing data types. When names of datatypes become difficult to use in programs, typedef is used with user-defined datatypes, which behave similarly to defining an alias for commands.
+
+    example:
+        #include <stdio.h>
+        typedef int Integer;
+        int main() {
+            // n is of type int, but we are using alias Integer
+            Integer n = 10;
+            printf("%d", n);
+            return 0;
+        }
+
+enum:
+    An enum is a special type that represents a group of constants (unchangeable values).
+    example:
+        enum Level {
+            LOW,
+            MEDIUM,
+            HIGH
+        };
+
+char *str:
+    Example:
+    char *str = "Hello, World!";
+    str stores the string "Hello, World!" in memory as follows:
+        1)Memory Allocation:
+            "Hello, World!" is a string literal.
+            String literals are stored in read-only memory (usually in the .rodata section).
+            The pointer str holds the memory address of the first character of the string.
+        2) Breakdown of Memory Storage
+            Address (example)           Value               Description
+            0x1000                      'H'                 First character
+            0x1001                      'e'
+            .
+            .
+            0x100C                      '!'
+            0x100D                      '\0'                Null terminator
+        3)Important Notes
+            String literals are immutable (you cannot change only read)
+            if you want to modify it then use this approch
+                char str[] = "Hello, World!";
+
+
+Uninitialized Pointer Problem:
+    An uninitialized pointer is a pointer variable that has been declared but has not been assigned a valid memory address before it is used. Accessing or dereferencing such a pointer leads to undefined behavior, which can cause program crashes, memory corruption, or unexpected results.
+    Example(Problem):
+            int *ptr;  // Uninitialized pointer
+            *ptr = 10; // Undefined behavior (dereferencing an uninitialized pointer)
+
+            printf("%d\n", *ptr); // May crash or produce garbage value
+    Example(Solution):
+        int *ptr = NULL;
+        if (ptr != NULL) {  // Always check before dereferencing
+            *ptr = 10;
+        }
+
