@@ -62,3 +62,31 @@ Uninitialized Pointer Problem:
             *ptr = 10;
         }
 
+Reason for switching from unsorted array of rows to a B-Tree:
+    1)Efficient Lookups
+        - Unsorted arrays require a full table scan to find a specific row → O(n) complexity.
+        - B-Trees allow logarithmic time lookups → O(log n) complexity.
+
+    2)Efficient Insertions
+        - Unsorted arrays allow fast insertions (append at end) but slow lookups.
+        - Sorted arrays enable binary search but require shifting rows for insertion.
+        - B-Trees balance both: logarithmic insertions without excessive row shifting.
+
+    3)Efficient Deletions
+        - In an unsorted array, deleting a row creates a gap, requiring shifting all subsequent rows.
+        - In a B-Tree, deletion is handled efficiently by rebalancing nodes.
+    
+    4)Balanced Performance
+        - B-Trees minimize disk I/O by storing multiple rows per node.
+        - Keeps the structure balanced, ensuring all operations are fast and predictable.
+
+    5)Scalability
+        - As the dataset grows, B-Trees scale efficiently while maintaining quick access.
+        - Suitable for large databases where searching, inserting, and deleting happen frequently.
+
+            	    Unsorted Array of rows	Sorted Array of rows	Tree of nodes
+    Pages contain	only data	            only data	            metadata, primary keys, and data
+    Rows per page	more	                more	                fewer
+    Insertion	    O(1)	                O(n)	                O(log(n))
+    Deletion	    O(n)	                O(n)	                O(log(n))
+    Lookup by id	O(n)	                O(log(n))	            O(log(n))

@@ -111,10 +111,60 @@ struct Table_t
 };
 typedef struct Table_t Table;
 
+typedef struct
+{
+    Table *table;
+    uint32_t row_num;
+    bool end_of_table; // Indicates a position one past the last element
+} Cursor;
+
+/*
+The start_table function creates and initializes a Cursor that points to the beginning of a table. This cursor helps in traversing rows of the table.
+    Parameters:
+        Table *table-> A pointer to the table from which the cursor will start.
+    Return value:
+        Returns a pointer to a Cursor that represents the starting position in the table.
+*/
+Cursor *start_table(Table *table)
+{
+    Cursor *cursor = malloc(sizeof(Cursor)); // Allocate memory
+    cursor->table = table;                   // The cursor stores a reference to the table.
+    cursor->row_num = 0;                     // It starts at row_num = 0, meaning it points to the first row.
+    // If num_rows == 0, then there are no rows in the table, and end_of_table is set to true (1).otherewise false.
+    cursor->end_of_table = (table->num_rows == 0);
+
+    return cursor;
+}
+
+/*
+The end_table function creates and initializes a Cursor that points to the end of a table. It is useful for inserting new rows at the end of the table.
+    Parameters:
+        Table *table-> A pointer to the table from which the cursor will end.
+    Return value:
+        Returns a pointer to a Cursor that represents the ending position in the table.
+*/
+Cursor *end_table(Table *table)
+{
+    Cursor *cursor = malloc(sizeof(Cursor)); // Allocate memory
+    cursor->table = table;                   // The cursor stores a reference to the table.
+    // Sets row_num to table->num_rows, which means the cursor points to the first empty row after the last stored row.
+    cursor->row_num = table->num_rows;
+    cursor->end_of_table = true; // indicate that the cursor is at the end.
+
+    return cursor;
+}
+
+void cursor_advance(Cursor *cursor)
+{
+    cursor->row_num += 1;
+    if (cursor->row_num == cursor->table->num_rows)
+        cursor->end_of_table = true;
+}
+
 // This function print select result.
 void print_row(Row *row)
 {
-    printf("%d, %s, %s", row->id, row->username, row->email);
+    printf("%d, %s, %s\n", row->id, row->username, row->email);
 }
 
 /*
@@ -202,18 +252,18 @@ void *get_page(Pager *pager, uint32_t page_num)
 }
 
 /*
-The row_slot function calculates the memory location of a specific row in a table. It uses paging to locate the correct memory page and then determines the exact byte offset of the row within that page.
+The cursor_value function calculates the memory location of a specific row in a table. It uses paging to locate the correct memory page and then determines the exact byte offset of the row within that page.
     Parameters:
-        table: A pointer to a Table structure, which holds the database rows.
-        row_num: The row number that we need to retrieve.
+        Cursor *cursor-> A pointer to a Cursor object, which tracks the current position in the table.
     return value:
-    Returns a pointer to the location in memory where the specified row is stored.
+        Returns a pointer to the location in memory where the specified row is stored.
  */
-void *row_slot(Table *table, uint32_t row_num)
+void *cursor_value(Cursor *cursor)
 {
-    uint32_t page_num = row_num / ROWS_PER_PAGE;   // Determine the Page Number
-    void *page = get_page(table->pager, page_num); // Fetch the Page from the Pager
-    uint32_t row_offset = row_num % ROWS_PER_PAGE; // Calculate Row Offset Within the Page
+    uint32_t row_num = cursor->row_num;
+    uint32_t page_num = row_num / ROWS_PER_PAGE;           // Determine the Page Number
+    void *page = get_page(cursor->table->pager, page_num); // Fetch the Page from the Pager
+    uint32_t row_offset = row_num % ROWS_PER_PAGE;         // Calculate Row Offset Within the Page
     /*
     Byte offset: The byte offset is the distance (in bytes) from the beginning of a page to the start of the desired row. It is not where the row ends, but rather where it begins within the page.
 
@@ -538,20 +588,26 @@ ExecuteResult execute_insert(Statement *statement, Table *table)
         return EXECUTE_TABLE_FULL;
 
     Row *row_to_insert = &(statement->row_to_insert);
-    serialize_row(row_to_insert, row_slot(table, table->num_rows));
+    Cursor *cursor = end_table(table);
+    serialize_row(row_to_insert, cursor_value(cursor));
     table->num_rows += 1;
 
+    free(cursor);
     return EXECUTE_SUCCESS;
 }
 
 ExecuteResult execute_select(Statement *statement, Table *table)
 {
+    Cursor *cursor = start_table(table);
     Row row; // if we use Row *row than memory is unintialized and program may crash to avoid this using Row row
-    for (uint32_t i = 0; i < table->num_rows; i++)
+
+    while (!(cursor->end_of_table))
     {
-        deserialize_row(row_slot(table, i), &row);
+        deserialize_row(cursor_value(cursor), &row);
         print_row(&row);
+        cursor_advance(cursor);
     }
+    free(cursor);
     return EXECUTE_SUCCESS;
 }
 
