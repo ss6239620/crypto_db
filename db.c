@@ -72,6 +72,12 @@ enum ExecuteResult_t
 };
 typedef enum ExecuteResult_t ExecuteResult;
 
+typedef enum
+{
+    INTERNAL_NODE,
+    LEAF_NODE
+} NodeType;
+
 enum MetaCommandResult_t
 {
     META_COMMAND_SUCCESS,
@@ -96,10 +102,131 @@ const uint32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES; // Total number
 
 // Constansts For Pager end here
 
+/*
+Each node will correspond to one page. Nodes need to store some metadata in a header at the beginning of the page. Every node will store what type of node it is, whether or not it is the root node, and a pointer to its parent (to allow finding a node’s siblings).
+
+Header Layout start here
+*/
+// Common Node Header Layout start here
+//  The first byte (offset 0) stores the node type (Leaf or Internal)
+const uint32_t NODE_TYPE_SIZE = sizeof(uint8_t);
+const uint32_t NODE_TYPE_OFFSET = 0;
+
+// The second byte (offset 1) is a flag indicating whether the node is the root
+const uint32_t IS_ROOT_SIZE = sizeof(uint8_t);
+const uint32_t IS_ROOT_OFFSET = NODE_TYPE_SIZE;
+
+// The next 4 bytes (offset 2-5) store a pointer to the parent node
+const uint32_t PARENT_POINTER_SIZE = sizeof(uint32_t);
+const uint32_t PARENT_POINTER_OFFSET = IS_ROOT_OFFSET + IS_ROOT_SIZE;
+
+const uint32_t COMMON_NODE_HEADER_SIZE = NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_OFFSET;
+// Common Node Header Layout end here
+
+// Leaft Node Header Layout start here
+// The next 4 bytes (offset 6-9) store a number of cells present in current page
+const uint32_t LEAF_NODE_NUM_CELLS_SIZE = sizeof(uint32_t);
+const uint32_t LEAF_NODE_NUM_CELLS_OFFSET = COMMON_NODE_HEADER_SIZE;
+
+const uint32_t LEAF_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE;
+// Leaft Node Header Layout end here
+
+// Leaf Node Body layout start here (Now the whole page from here is generally used to store cells(Key+value))
+const uint32_t LEAF_NODE_KEY_SIZE = sizeof(uint32_t); // occupies 4 bytes
+const uint32_t LEAF_NODE_KEY_OFFSET = 0;
+// This occupies the size of the whole row currently(id + username + email = 4 + 33 + 256 = 292 bytes)
+const uint32_t LEAF_NODE_VALUE_SIZE = ROW_SIZE;
+const uint32_t LEAF_NODE_VALUE_OFFSET = LEAF_NODE_KEY_OFFSET + LEAF_NODE_KEY_SIZE;
+// Sum of both key and value to get cell size currently (cell size = key + value = 4 + 292 = 296 bytes)
+const uint32_t LEAF_NODE_CELL_SIZE = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
+// Available space to store key value pair in page currently (current page size - total header = 4096 - 9 = 4088 bytes)
+const uint32_t LEAF_NODE_SPACE_FOR_CELL = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
+// Max that can be occupied in one page can be found by dividing Available space by cell size
+const uint32_t LEAF_NODE_MAX_CELL = LEAF_NODE_SPACE_FOR_CELL / LEAF_NODE_CELL_SIZE;
+// Leaf Node Body layout end here
+
+/**
+ * @brief Returns a pointer to the number of cells (key-value pairs) in a leaf node.
+ *
+ * Each leaf node in the B-tree has a header containing metadata, including the
+ * number of stored cells. This function provides a pointer to that value,
+ * allowing direct access and modification.
+ *
+ * @param node A pointer to the start of the leaf node in memory.
+ *
+ * @return A pointer to the number of cells stored in the leaf node.
+ */
+uint32_t *leaf_node_num_cells(void *node)
+{
+    return node + LEAF_NODE_NUM_CELLS_OFFSET;
+}
+
+/**
+ * @brief Retrieves a pointer to a specific cell (key-value pair) in a leaf node (aka page).
+ *
+ * A leaf node consists of a header (metadata) and a body that stores key-value pairs sequentially.
+ * This function calculates the memory offset for the specified cell and returns a pointer to it.
+ *
+ * The offset is determined by skipping the header and adding an offset based on the cell index.
+ *
+ * @param node A pointer to the beginning of the leaf node (aka page) in memory.
+ * @param cell_num The index of the cell to retrieve (0-based index).
+ *
+ * @return A pointer to the memory location of the requested cell within the leaf node.
+ */
+void *leaf_node_cell(void *node, uint32_t cell_num)
+{
+    return node + LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE;
+}
+
+/**
+ * @brief Retrieves the key of a specific cell in a leaf node (aka page).
+ *
+ * Each cell in a leaf node contains a key-value pair. This function locates the requested cell
+ * and extracts the key from it.
+ *
+ * @param node A pointer to the beginning of the leaf node (aka page) in memory.
+ * @param cell_num The index of the cell to retrieve the key from (0-based index).
+ *
+ * @return The key (an unsigned 32-bit integer) stored in the specified cell.
+ */
+uint32_t *leaf_node_key(void *node, uint32_t cell_num)
+{
+    return leaf_node_cell(node, cell_num);
+}
+
+/**
+ * @brief Retrieves a pointer to the value stored in a specific cell of a leaf node (aka page).
+ *
+ * Each cell in a leaf node consists of a key-value pair. The key is stored at the beginning,
+ * followed by the value. This function calculates the offset to access the value by skipping
+ * the key portion of the cell.
+ *
+ * @param node A pointer to the beginning of the leaf node (aka page) in memory.
+ * @param cell_num The index of the cell to retrieve the value from (0-based index).
+ *
+ * @return A pointer to the memory location where the value is stored in the specified cell.
+ */
+void *leaf_node_value(void *node, uint32_t cell_num)
+{
+    return leaf_node_cell(node, cell_num) + LEAF_NODE_KEY_SIZE;
+}
+
+/**
+ * @brief Initializes a leaf node (aka page) by setting the number of cells to zero.
+ *
+ * This function prepares a new leaf node by ensuring it starts with zero key-value pairs.
+ * The number of cells in a leaf node is stored in the header at a fixed offset.
+ *
+ * @param node A pointer to the beginning of the leaf node (aka page) in memory.
+ */
+void initialize_leaf_node(void *node) { *leaf_node_num_cells(node) = 0; }
+
 struct Pager_t
 {
     int file_descriptor;          // 4 bytes
     uint32_t file_length;         // 4 bytes
+    uint32_t num_pages;           // 4 bytes
     void *pages[TABLE_MAX_PAGES]; // 100 pointers = (void *) 8 bytes * 100 = 800 bytes
 };
 typedef struct Pager_t Pager;
@@ -107,95 +234,17 @@ typedef struct Pager_t Pager;
 struct Table_t
 {
     Pager *pager;
-    uint32_t num_rows;
+    uint32_t root_page_num;
 };
 typedef struct Table_t Table;
 
 typedef struct
 {
     Table *table;
-    uint32_t row_num;
+    uint32_t page_num;
+    uint32_t cell_num;
     bool end_of_table; // Indicates a position one past the last element
 } Cursor;
-
-/*
-The start_table function creates and initializes a Cursor that points to the beginning of a table. This cursor helps in traversing rows of the table.
-    Parameters:
-        Table *table-> A pointer to the table from which the cursor will start.
-    Return value:
-        Returns a pointer to a Cursor that represents the starting position in the table.
-*/
-Cursor *start_table(Table *table)
-{
-    Cursor *cursor = malloc(sizeof(Cursor)); // Allocate memory
-    cursor->table = table;                   // The cursor stores a reference to the table.
-    cursor->row_num = 0;                     // It starts at row_num = 0, meaning it points to the first row.
-    // If num_rows == 0, then there are no rows in the table, and end_of_table is set to true (1).otherewise false.
-    cursor->end_of_table = (table->num_rows == 0);
-
-    return cursor;
-}
-
-/*
-The end_table function creates and initializes a Cursor that points to the end of a table. It is useful for inserting new rows at the end of the table.
-    Parameters:
-        Table *table-> A pointer to the table from which the cursor will end.
-    Return value:
-        Returns a pointer to a Cursor that represents the ending position in the table.
-*/
-Cursor *end_table(Table *table)
-{
-    Cursor *cursor = malloc(sizeof(Cursor)); // Allocate memory
-    cursor->table = table;                   // The cursor stores a reference to the table.
-    // Sets row_num to table->num_rows, which means the cursor points to the first empty row after the last stored row.
-    cursor->row_num = table->num_rows;
-    cursor->end_of_table = true; // indicate that the cursor is at the end.
-
-    return cursor;
-}
-
-void cursor_advance(Cursor *cursor)
-{
-    cursor->row_num += 1;
-    if (cursor->row_num == cursor->table->num_rows)
-        cursor->end_of_table = true;
-}
-
-// This function print select result.
-void print_row(Row *row)
-{
-    printf("%d, %s, %s\n", row->id, row->username, row->email);
-}
-
-/*
-The serialize_row function is responsible for converting (serializing) a Row structure into a binary format so that it can be stored in a buffer (destination).
-    Parameters:
-        Row *source → A pointer to the Row structure that contains the data to be serialized.
-        void *destination → A pointer to a block of memory (buffer) where the serialized data will be
-    return value: The function does not return a value.
-*/
-void serialize_row(Row *source, void *destination)
-{
-    // Copies the id field from source to destination at the correct offset (ID_OFFSET).
-    memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
-    memcpy(destination + USERNAME_OFFSET, &(source->username), USERNAME_SIZE); // same for username
-    memcpy(destination + EMAIL_OFFSET, &(source->email), EMAIL_SIZE);          // same for email
-}
-
-/*
-The deserialize_row function reconstructs a Row structure from a serialized binary format stored in a memory buffer (source). Essentially, this function reverses what serialize_row did.
-    Parameters:
-        void *source → A pointer to a block of memory containing serialized Row data.
-        Row *destination → A pointer to a Row structure where the deserialized data will be stored.
-    return value: The function does not return a value.
-*/
-void deserialize_row(void *source, Row *destination)
-{
-    // Copies the id field from source into destination->id
-    memcpy(&(destination->id), source + ID_OFFSET, ID_SIZE);
-    memcpy(&(destination->username), source + USERNAME_OFFSET, USERNAME_SIZE); // same here
-    memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);          // same here
-}
 
 /*
 This function is responsible for retrieving a page from the pager. It handles both retrieving an already cached page and loading a page from a file into memory if it is not yet cached.
@@ -247,36 +296,142 @@ void *get_page(Pager *pager, uint32_t page_num)
             }
         }
         pager->pages[page_num] = page;
+
+        if (page_num >= pager->num_pages)
+        {
+            pager->num_pages = page_num + 1;
+        }
     }
     return pager->pages[page_num];
 }
 
+/**
+ * @brief Initializes a Cursor that points to the first row of a table.
+ *
+ * Functionality:
+        - Allocates memory for a Cursor.
+        - Sets the cursor to start at the root page of the table.
+        - Initializes the cell position to 0 (beginning of the page).
+        - Retrieves the root node and checks the number of cells in it.
+        - If the table has no rows, marks the cursor as `end_of_table`.
+ *
+ * @param table A pointer to the table from which the cursor will start.
+ *
+ * @return `cursor` A pointer to a Cursor representing the starting position in the table.
+ */
+Cursor *start_table(Table *table)
+{
+    Cursor *cursor = malloc(sizeof(Cursor)); // Allocate memory
+    cursor->table = table;                   // The cursor stores a reference to the table.
+    cursor->page_num = table->root_page_num; // Start at the root page of the table
+    cursor->cell_num = 0;                    // Start at the first cell (row) in the root page
+
+    // Get the root page (which is a leaf node in this case)
+    void *root_node = get_page(table->pager, table->root_page_num);
+    uint32_t num_cell = *leaf_node_num_cells(root_node); // Get the number of cells (rows) in the root node
+    // If there are no rows, mark the cursor as being at the end of the table
+    cursor->end_of_table = (num_cell == 0);
+    return cursor;
+}
+
+/**
+ * @brief  Creates and initializes a Cursor that points to the end of a table.
+    This is useful for inserting new rows at the end.
+ *
+ * Functionality:
+        - Allocates memory for a Cursor.
+        - Sets the cursor to point to the root page of the table.
+        - Retrieves the root node and determines the number of existing cells (rows).
+        - Positions the cursor at `cell_num = num_cells`, meaning it points to the next available row.
+        - Marks `end_of_table = true` to indicate it is at the end.
+ *
+ * @param table A pointer to the table from which the cursor will start.
+ *
+ * @return `cursor` A pointer to a Cursor representing the starting position in the table.
+ */
+Cursor *end_table(Table *table)
+{
+    Cursor *cursor = malloc(sizeof(Cursor)); // Allocate memory
+    cursor->table = table;                   // The cursor stores a reference to the table.
+    cursor->page_num = table->root_page_num; // Set the cursor to the root page of the table.
+
+    // Retrieve the root page (assumed to be a leaf node)
+    void *root_node = get_page(table->pager, table->root_page_num);
+    uint32_t num_cell = *leaf_node_num_cells(root_node); // Get the number of cells (rows) in the root node
+    cursor->cell_num = num_cell;                         // Position the cursor at the end
+    cursor->end_of_table = true;                         // Indicate that the cursor is at the end of the table
+    return cursor;
+}
+
+/**
+ * @brief Advances the cursor to the next row in the table.
+ *
+ * This function moves the cursor to the next cell in the current leaf node.
+ * If the cursor reaches the end of the node, it sets the `end_of_table` flag to true.
+ *
+ * @param cursor A pointer to a Cursor object, which tracks the current position in the table.
+ */
+void cursor_advance(Cursor *cursor)
+{
+    void *node = get_page(cursor->table->pager, cursor->page_num); // Fetch the current node (page) from the pager
+
+    cursor->cell_num += 1; // Move the cursor to the next cell
+    // If the cursor moves past the last cell in the node, mark the end of the table
+    if (cursor->cell_num >= (*leaf_node_num_cells(node)))
+        cursor->end_of_table = true;
+}
+
+// This function print select result.
+void print_row(Row *row)
+{
+    printf("%d, %s, %s\n", row->id, row->username, row->email);
+}
+
 /*
-The cursor_value function calculates the memory location of a specific row in a table. It uses paging to locate the correct memory page and then determines the exact byte offset of the row within that page.
+The serialize_row function is responsible for converting (serializing) a Row structure into a binary format so that it can be stored in a buffer (destination).
     Parameters:
-        Cursor *cursor-> A pointer to a Cursor object, which tracks the current position in the table.
-    return value:
-        Returns a pointer to the location in memory where the specified row is stored.
+        Row *source → A pointer to the Row structure that contains the data to be serialized.
+        void *destination → A pointer to a block of memory (buffer) where the serialized data will be
+    return value: The function does not return a value.
+*/
+void serialize_row(Row *source, void *destination)
+{
+    // Copies the id field from source to destination at the correct offset (ID_OFFSET).
+    memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
+    memcpy(destination + USERNAME_OFFSET, &(source->username), USERNAME_SIZE); // same for username
+    memcpy(destination + EMAIL_OFFSET, &(source->email), EMAIL_SIZE);          // same for email
+}
+
+/*
+The deserialize_row function reconstructs a Row structure from a serialized binary format stored in a memory buffer (source). Essentially, this function reverses what serialize_row did.
+    Parameters:
+        void *source → A pointer to a block of memory containing serialized Row data.
+        Row *destination → A pointer to a Row structure where the deserialized data will be stored.
+    return value: The function does not return a value.
+*/
+void deserialize_row(void *source, Row *destination)
+{
+    // Copies the id field from source into destination->id
+    memcpy(&(destination->id), source + ID_OFFSET, ID_SIZE);
+    memcpy(&(destination->username), source + USERNAME_OFFSET, USERNAME_SIZE); // same here
+    memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);          // same here
+}
+
+/**
+ * @brief Retrieves the memory location of a specific row in a table.
+ *
+ * This function uses paging to locate the correct memory page and then determines
+ * the exact byte offset of the row within that page.
+ *
+ * @param cursor A pointer to a Cursor object, which tracks the current position in the table.
+ *               It contains details like the table reference, pager, page number, and cell number.
+ *
+ * @return A pointer to the location in memory where the specified row is stored.
  */
 void *cursor_value(Cursor *cursor)
 {
-    uint32_t row_num = cursor->row_num;
-    uint32_t page_num = row_num / ROWS_PER_PAGE;           // Determine the Page Number
-    void *page = get_page(cursor->table->pager, page_num); // Fetch the Page from the Pager
-    uint32_t row_offset = row_num % ROWS_PER_PAGE;         // Calculate Row Offset Within the Page
-    /*
-    Byte offset: The byte offset is the distance (in bytes) from the beginning of a page to the start of the desired row. It is not where the row ends, but rather where it begins within the page.
-
-    Calculate the Byte Offset
-        ROW_SIZE represents the number of bytes occupied by a single row.
-        This calculation determines how far into the page the row is stored.
-        Example: If ROW_SIZE = 200 bytes and row_offset = 2 then byte_offset = 2 * 200 = 400
-                Row 0 starts at 0 * ROW_SIZE = 0
-                Row 1 starts at 1 * ROW_SIZE = 200
-                Row 2 starts at 2 * ROW_SIZE = 400
-    */
-    uint32_t byte_offset = row_offset * ROW_SIZE;
-    return page + byte_offset;
+    void *page = get_page(cursor->table->pager, cursor->page_num); // Fetch the Page from the Pager
+    return leaf_node_value(page, cursor->cell_num);
 }
 
 /*
@@ -306,6 +461,13 @@ Pager *page_open(const char *filename)
     Pager *pager = (Pager *)malloc(sizeof(Pager));
     pager->file_descriptor = fd;
     pager->file_length = file_length;
+    pager->num_pages = (file_length / PAGE_SIZE);
+
+    if (file_length % PAGE_SIZE)
+    {
+        printf("Db file does not have whole number pages it is likely corrupted\n");
+        exit(EXIT_FAILURE);
+    }
 
     //  Initializing Page Pointers as NULL
     for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++)
@@ -314,18 +476,55 @@ Pager *page_open(const char *filename)
     return pager;
 }
 
-// Open a Database connection and pepare the table
+/**
+ * @brief Opens a database file and initializes the table structure.
+ *
+ * This function loads the database file and sets up the pager for managing pages.
+ * If the database file is new (empty), it initializes the first page as a leaf node.
+ *
+ * @param filename The name of the database file to open.
+ * @return A pointer to a Table structure representing the database.
+ */
 Table *db_open(const char *filename)
 {
     Pager *pager = page_open(filename);
-    // Find Intial number of rows present inside db file
-    uint32_t num_rows = pager->file_length / ROW_SIZE;
 
     Table *table = (Table *)malloc(sizeof(Table));
     table->pager = pager;
-    table->num_rows = num_rows;
+    table->root_page_num = 0;
+
+    if (pager->num_pages == 0)
+    {
+        // New database file. Initialize page 0 as leaf node.
+        void *root = get_page(pager, 0);
+        initialize_leaf_node(root);
+    }
 
     return table;
+}
+
+void leaf_node_insert(Cursor *cursor, uint32_t key, Row *value)
+{
+    void *node = get_page(cursor->table->pager, cursor->page_num);
+
+    uint32_t num_cell = *leaf_node_num_cells(node);
+    if (num_cell >= LEAF_NODE_MAX_CELL)
+    {
+        // Node (page) full need branching.
+        printf("Needs to implement branching.\n");
+        exit(EXIT_FAILURE);
+    }
+    if (cursor->cell_num < num_cell)
+    {
+        // Make room for new cell
+        for (uint32_t i = num_cell; i > cursor->cell_num; i--)
+        {
+            memcpy(leaf_node_cell(node, i), leaf_node_cell(node, i - 1), LEAF_NODE_CELL_SIZE);
+        }
+    }
+    *(leaf_node_num_cells(node)) += 1;
+    *(leaf_node_key)(node, cursor->cell_num) = key;
+    serialize_row(value, leaf_node_value(node, cursor->cell_num));
 }
 
 // Intialize new input buffer
@@ -425,14 +624,17 @@ void read_input(InputBuffer *input_buffer)
     }
 }
 
-/*
-The function pager_flush is responsible for writing a specific page from memory to a file on disk. This function ensures that data stored in memory (inside pager->pages[]) is saved to the database file before exiting or continuing execution.
-Parameters:
-    pager: A pointer to a Pager struct, which manages the database file.
-    page_num: The index of the page to be flushed (written) to disk.
-    size: The number of bytes to write to the file.
-*/
-void pager_flush(Pager *pager, uint32_t page_num, uint32_t size)
+/**
+ * @brief Writes a specific page from memory to the database file on disk.
+ *
+ * This function ensures that any modifications made to a page in memory (pager->pages[])
+ * are saved to the database file, preventing data loss before program termination
+ * or continued execution.
+ *
+ * @param pager A pointer to the Pager struct that manages the database file.
+ * @param page_num The index of the page to be flushed (written) to disk.
+ */
+void pager_flush(Pager *pager, uint32_t page_num)
 {
     if (pager->pages[page_num] == NULL)
     {
@@ -447,7 +649,7 @@ void pager_flush(Pager *pager, uint32_t page_num, uint32_t size)
         exit(EXIT_FAILURE);
     }
     // If we flush the file we write the data inside pager to databse so it isnt lost.
-    ssize_t byte_written = write(pager->file_descriptor, pager->pages[page_num], size);
+    ssize_t byte_written = write(pager->file_descriptor, pager->pages[page_num], PAGE_SIZE);
 
     if (byte_written == -1)
     {
@@ -465,28 +667,15 @@ The function db_close is responsible for closing the database properly. It does 
 */
 void db_close(Table *table)
 {
-    Pager *pager = table->pager;                               // Pointer to the table
-    uint32_t num_full_pages = table->num_rows / ROWS_PER_PAGE; // Total number of pages which have rows
+    Pager *pager = table->pager; // Pointer to the table
 
-    for (uint32_t i = 0; i < num_full_pages; i++)
+    for (uint32_t i = 0; i < pager->num_pages; i++)
     {
         if (pager->pages[i] == NULL)
             continue;
-        pager_flush(pager, i, PAGE_SIZE); // save to db
+        pager_flush(pager, i); // save to db
         free(pager->pages[i]);
         pager->pages[i] = NULL;
-    }
-    // There may be a partial page to write to the end of the file
-    uint32_t num_additional_rows = table->num_rows % ROWS_PER_PAGE;
-    if (num_additional_rows > 0)
-    {
-        uint32_t num_page = num_full_pages; // As num_full_pages will have the last page
-        if (pager->pages[num_page] != NULL)
-        {
-            pager_flush(pager, num_page, num_additional_rows * ROW_SIZE); // save to db
-            free(pager->pages[num_page]);
-            pager->pages[num_page] = NULL;
-        }
     }
 
     int result = close(pager->file_descriptor); // close the file descriptor
@@ -514,12 +703,44 @@ void print_prompt()
     printf("crypto> ");
 }
 
+void print_constant()
+{
+    printf("ROW_SIZE: %d\n", ROW_SIZE);
+    printf("COMMON_NODE_HEADER_SIZE: %d\n", COMMON_NODE_HEADER_SIZE);
+    printf("LEAF_NODE_HEADER_SIZE: %d\n", LEAF_NODE_HEADER_SIZE);
+    printf("LEAF_NODE_CELL_SIZE: %d\n", LEAF_NODE_CELL_SIZE);
+    printf("LEAF_NODE_SPACE_FOR_CELLS: %d\n", LEAF_NODE_SPACE_FOR_CELL);
+    printf("LEAF_NODE_MAX_CELLS: %d\n", LEAF_NODE_MAX_CELL);
+}
+
+void print_leaf_node(void *node)
+{
+    uint32_t num_cells = *leaf_node_num_cells(node);
+    for (uint32_t i = 0; i < num_cells; i++)
+    {
+        uint32_t key = *leaf_node_key(node, i);
+        printf(" - %d : %d", i, key);
+    }
+}
+
 MetaCommandResult do_meta_command(InputBuffer *input_buffer, Table *table)
 {
     if (strcmp(input_buffer->buffer, ".exit") == 0)
     {
         db_close(table);
         exit(EXECUTE_SUCCESS);
+    }
+    else if (strcmp(input_buffer->buffer, ".constant") == 0)
+    {
+        printf("Constants:\n");
+        print_constant();
+        return META_COMMAND_SUCCESS;
+    }
+    else if (strcmp(input_buffer->buffer, ".btree") == 0)
+    {
+        printf("Tree:\n");
+        print_leaf_node(get_page(table->pager, 0));
+        return META_COMMAND_SUCCESS;
     }
     else
     {
@@ -584,13 +805,14 @@ PrepareResult prepare_statement(InputBuffer *input_buffer, Statement *statement)
 
 ExecuteResult execute_insert(Statement *statement, Table *table)
 {
-    if (table->num_rows >= TABLE_MAX_ROWS)
+    void *node = get_page(table->pager, table->root_page_num);
+    if ((*leaf_node_num_cells(node) >= LEAF_NODE_MAX_CELL))
         return EXECUTE_TABLE_FULL;
 
     Row *row_to_insert = &(statement->row_to_insert);
     Cursor *cursor = end_table(table);
-    serialize_row(row_to_insert, cursor_value(cursor));
-    table->num_rows += 1;
+
+    leaf_node_insert(cursor, row_to_insert->id, row_to_insert);
 
     free(cursor);
     return EXECUTE_SUCCESS;

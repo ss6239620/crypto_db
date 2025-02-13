@@ -83,6 +83,8 @@ Reason for switching from unsorted array of rows to a B-Tree:
     5)Scalability
         - As the dataset grows, B-Trees scale efficiently while maintaining quick access.
         - Suitable for large databases where searching, inserting, and deleting happen frequently.
+    6)Avoiding partial Pages
+        =Every node is going to take up exactly one page, even if it’s not full. That means our pager no longer needs to support reading/writing partial pages.
 
             	    Unsorted Array of rows	Sorted Array of rows	Tree of nodes
     Pages contain	only data	            only data	            metadata, primary keys, and data

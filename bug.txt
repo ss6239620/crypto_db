@@ -1,0 +1,17 @@
+1)Select bug issue
+    issue: Okay, so I'm trying to figure out why when I run my program and insert some data, when I select it back, the first two rows show garbage values but the third one is fine.
+
+    //this make LEAF_NODE_VALUE_SIZE = 4 bytes 
+    Faulty code: const uint32_t LEAF_NODE_VALUE_SIZE = sizeof(ROW_SIZE); 
+
+    Reason for the bug:
+        So in the code, the definition is incorrect. Thus, LEAF_NODE_CELL_SIZE is 4 + 4 = 8 bytes instead of 4+293=297, which is wrong. This would cause the leaf_node_insert function to write incorrect lengths for the cells, leading to data being written beyond the allocated space. Thus, when reading back, the data is misaligned, leading to the garbage values.
+
+        So when I insert a row, it's only writing 8 bytes for each cell instead of 297. So the first row is written into the first cell, but the function erroneously shifts only 8 bytes, not 297, leading to data being overwritten or misread.
+
+        Therefore, when I find that the first two rows are garbage, it's because the LEAF_NODE_CELL_SIZE is incorrect, causing the leaf_node_insert function to shift cells incorrectly, writing into wrong locations, and when reading back, the data is misaligned, showing garbage.
+        
+        Due to the incorrect size, when multiple rows were stored, the data from one row might overwrite parts of another.
+        This can explain why the third row (which might be in a new or untouched part of the page) shows correctly, while earlier rows are corrupted.
+
+    Solution: const uint32_t LEAF_NODE_VALUE_SIZE = ROW_SIZE; 

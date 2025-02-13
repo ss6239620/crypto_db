@@ -8,6 +8,15 @@
         "string": "c",
         "streambuf": "c",
         "stdio.h": "c",
-        "string.h": "c"
+        "string.h": "c",
+        "array": "c",
+        "deque": "c",
+        "unordered_map": "c",
+        "vector": "c",
+        "iterator": "c",
+        "string_view": "c",
+        "format": "c",
+        "span": "c",
+        "stdint.h": "c"
     }
 }
