@@ -500,7 +500,6 @@ PrepareResult prepare_insert(InputBuffer *input_buffer, Statement *statement)
 
     if (id_string == NULL || username == NULL || email == NULL)
     {
-        printf("heheh");
         return PREPARE_SYNTAX_ERROR;
     }
     int id = atoi(id_string);
