@@ -51,3 +51,16 @@
         The cell with (0, , ) indicates the id is zero, and strings are empty. This suggests the cell wasn't properly written during the split, leaving memory initialized to zero (common with malloc).
 
     Solution:  for (int32_t i = LEAF_NODE_MAX_CELL; i >= 0; i--)
+
+4) The COMMON_NODE_HEADER_SIZE was incorrectly calculated
+
+    issue: incorrectly calculated as NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_OFFSET, resulting in a header size of 4 bytes instead of the correct 6 bytes. This caused the leaf node's num_cells to overwrite part of the parent pointer, leading to invalid values.
+
+    Faulty_code: const uint32_t COMMON_NODE_HEADER_SIZE = NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_OFFSET
+
+    Reaon for bug: 
+        Parent Pointer Layout: The parent pointer starts at offset 2 and occupies 4 bytes (offsets 2-5).
+        Correct Header Size: The common header should be PARENT_POINTER_OFFSET (2) + PARENT_POINTER_SIZE (4) = 6 bytes.
+        Impact: Fixing this ensures subsequent fields (like num_cells in leaf nodes) are placed correctly, preventing memory corruption.
+
+    Solution: const uint32_t COMMON_NODE_HEADER_SIZE = PARENT_POINTER_OFFSET + PARENT_POINTER_SIZE;

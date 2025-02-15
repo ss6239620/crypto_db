@@ -124,7 +124,8 @@ const uint32_t IS_ROOT_OFFSET = NODE_TYPE_SIZE;
 const uint32_t PARENT_POINTER_SIZE = sizeof(uint32_t);
 const uint32_t PARENT_POINTER_OFFSET = IS_ROOT_OFFSET + IS_ROOT_SIZE;
 
-const uint32_t COMMON_NODE_HEADER_SIZE = NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_OFFSET;
+const uint32_t COMMON_NODE_HEADER_SIZE = PARENT_POINTER_OFFSET + PARENT_POINTER_SIZE;
+;
 // Common Node Header Layout end here
 
 // Leaft Node Header Layout start here
@@ -193,6 +194,33 @@ void set_node_root(void *node, bool is_root)
 {
     uint8_t value = is_root;
     *((uint8_t *)(node + IS_ROOT_OFFSET)) = value;
+}
+
+/**
+ * @brief Retrieves the parent pointer of a given B-tree node.
+ *
+ * Functionality:
+ *      - Given a pointer to a node in the B-tree, this function returns a pointer
+ *        to the memory location where the **parent node's page number** is stored.
+ *      - This is used to traverse **up the tree**, allowing operations like
+ *        splitting and merging nodes to update parent references.
+ *
+ * @param node A pointer to the current node in memory.
+ *
+ * @return `uint32_t*` A pointer to the memory location storing the parent node's page number.
+ *
+ * Example Usage:
+ * ```
+ * uint32_t parent_page = *node_parent(current_node);
+ * if (parent_page != 0) {
+ *     void *parent = get_page(pager, parent_page);
+ *     // Perform operations on the parent node
+ * }
+ * ```
+ */
+uint32_t *node_parent(void *node)
+{
+    return node + PARENT_POINTER_OFFSET;
 }
 
 /**
@@ -335,6 +363,7 @@ void initialize_leaf_node(void *node)
     set_node_root(node, false);
     *leaf_node_num_cells(node) = 0;
     *leaf_node_next_leaf(node) = 0;
+    *node_parent(node) = 0;
 }
 
 /*
@@ -359,6 +388,11 @@ const uint32_t INTERNAL_NODE_KEY_SIZE = sizeof(uint32_t);
 const uint32_t INTERNAL_NODE_CHILD_SIZE = sizeof(uint32_t);
 const uint32_t INTERNAL_NODE_CELL_SIZE = INTERNAL_NODE_CHILD_SIZE + INTERNAL_NODE_KEY_SIZE;
 // Internal Node Body layout end here
+
+/*
+INTERNAL_NODE_MAX_CELL = (Page Size − Header Size) / (Poimter size + key size)
+*/
+const uint32_t INTERNAL_NODE_MAX_CELL = (PAGE_SIZE -INTERNAL_NODE_HEADER_SIZE) / INTERNAL_NODE_CHILD_SIZE;
 
 /*
 Methods for reading and writing to an internal node:
@@ -489,6 +523,7 @@ void initialize_internal_node(void *node)
     set_node_type(node, INTERNAL_NODE);
     set_node_root(node, false);
     *internal_node_num_keys(node) = 0;
+    *node_parent(node) = 0;
 }
 
 /**
@@ -647,6 +682,73 @@ Cursor *find_leaf_node(Table *table, uint32_t page_num, uint32_t key)
 }
 
 /**
+ * @brief Finds the appropriate child index in an internal B-tree node for a given key.
+ *
+ * Functionality:
+ *      - This function performs a **binary search** within an internal node
+ *        to determine the correct child index that should be followed for a given key.
+ *      - It compares the key against stored keys and returns the **index**
+ *        where traversal should continue.
+ *      - This is essential for efficient tree navigation during searches and insertions.
+ *
+ * @param node A pointer to the internal B-tree node.
+ * @param key The key being searched for.
+ *
+ * @return `uint32_t` The index of the child pointer that should be followed.
+ *
+ * Example Usage:
+ * ```
+ * uint32_t child_index = internal_node_find_child(parent_node, search_key);
+ * uint32_t child_page_num = *internal_node_child(parent_node, child_index);
+ * ```
+ */
+uint32_t internal_node_find_child(void *node, uint32_t key)
+{
+    uint32_t num_keys = *(internal_node_num_keys(node));
+
+    /* Binary search to find index of child to search */
+    uint32_t min_index = 0;
+    uint32_t max_index = num_keys;
+
+    while (min_index != max_index)
+    {
+        uint32_t index = (min_index + max_index) / 2;
+        uint32_t key_at_index = *(internal_node_key(node, index));
+        if (key <= key_at_index)
+            max_index = index;
+        else
+            min_index = index + 1;
+    }
+    return min_index;
+}
+
+/**
+ * @brief Updates a key in an internal B-tree node.
+ *
+ * Functionality:
+ *      - Finds the index of an existing key (`old_key`) within the internal node.
+ *      - Replaces the key at that index with the **new key** (`new_key`).
+ *      - This is useful when a child node's maximum key changes, ensuring
+ *        that the parent node maintains correct key references.
+ *
+ * @param node A pointer to the internal B-tree node.
+ * @param old_key The key that needs to be updated.
+ * @param new_key The new key to replace the old one.
+ *
+ * @return `uint32_t*` A pointer to the updated key's location in memory.
+ *
+ * Example Usage:
+ * ```
+ * update_internal_node_key(parent_node, old_max_key, new_max_key);
+ * ```
+ */
+uint32_t *update_internal_node_key(void *node, uint32_t old_key, uint32_t new_key)
+{
+    uint32_t old_child_index = internal_node_find_child(node, old_key);
+    *internal_node_key(node, old_child_index) = new_key;
+}
+
+/**
  * @brief  Finds the correct child node to traverse in an internal node using binary search.
  *
  * Functionality:
@@ -670,22 +772,10 @@ Cursor *find_leaf_node(Table *table, uint32_t page_num, uint32_t key)
 Cursor *find_internal_node(Table *table, uint32_t page_num, uint32_t key)
 {
     void *node = get_page(table->pager, page_num);
-    uint32_t num_keys = *(internal_node_num_keys(node));
 
-    /* Binary search to find index of child to search */
-    uint32_t min_index = 0;
-    uint32_t max_index = num_keys;
-    while (min_index != max_index)
-    {
-        uint32_t index = (min_index + max_index) / 2;
-        uint32_t key_at_index = *(leaf_node_key(node, index));
-        if (key <= key_at_index)
-            max_index = index;
-        else
-            min_index = index + 1;
-    }
+    uint32_t child_index = internal_node_find_child(node, key);
     // remember that the children of an internal node can be either leaf nodes or more internal nodes
-    uint32_t child_page_num = *internal_node_child(node, min_index);
+    uint32_t child_page_num = *internal_node_child(node, child_index);
     void *child = get_page(table->pager, child_page_num);
     switch (get_node_type(child))
     {
@@ -929,6 +1019,7 @@ Table *db_open(const char *filename)
         void *root = get_page(pager, 0);
         initialize_leaf_node(root);
         set_node_root(root, true);
+        *node_parent(root) = 0;
     }
 
     return table;
@@ -958,8 +1049,83 @@ void create_new_root(Table *table, uint32_t right_child_page_num)
     uint32_t left_child_max_key = get_node_max_key(left_child);
     *internal_node_key(root, 0) = left_child_max_key;
     *internal_node_right_child(root) = right_child_page_num;
+    *node_parent(left_child) = table->root_page_num;
+    *node_parent(root_right_child) = table->root_page_num;
 }
 
+/**
+ * @brief Inserts a new child node into an internal B-tree node.
+ *
+ * Functionality:
+ *      - Retrieves the parent and child nodes from the table's pager.
+ *      - Determines the correct position (`index`) for inserting the new child node.
+ *      - Updates the parent node's key count.
+ *      - If the node exceeds `INTERNAL_NODE_MAX_CELL`, a split should occur (not implemented here).
+ *      - Updates the rightmost child if necessary, or shifts existing keys and child pointers.
+ *      - Sets the child's parent reference to maintain tree integrity.
+ *
+ * @param table A pointer to the table structure containing the B-tree.
+ * @param parent_page_num The page number of the parent node where insertion will occur.
+ * @param child_page_num The page number of the child node being inserted.
+ *
+ * @return void This function modifies the internal node structure in-place.
+ *
+ * Example Usage:
+ * ```
+ * internal_node_insert(table, parent_page_num, new_child_page_num);
+ * ```
+ */
+void internal_node_insert(Table *table, uint32_t parent_page_num, uint32_t child_page_num)
+{
+    void *parent = get_page(table->pager, parent_page_num);
+    void *child = get_page(table->pager, child_page_num);
+    uint32_t child_max_key = get_node_max_key(child);
+
+    // Find the correct index in the parent node where the new child should be inserted
+    uint32_t index = internal_node_find_child(parent, child_max_key);
+
+    // Store the original number of keys in the parent node
+    uint32_t orignal_num_keys = *internal_node_num_keys(parent);
+    *internal_node_num_keys(parent) = orignal_num_keys + 1;
+
+    // Check if the internal node has reached its maximum number of keys
+    if (orignal_num_keys >= INTERNAL_NODE_MAX_CELL)
+    {
+        printf("Need to implement splitting internal nodes. \n");
+        exit(EXIT_FAILURE);
+    }
+    // Retrieve the rightmost child of the parent node
+    uint32_t right_child_page_num = *internal_node_right_child(parent);
+    void *right_child = get_page(table->pager, right_child_page_num);
+
+    // If the new child’s max key is greater than the rightmost child’s max key,
+    // update the rightmost child pointer
+    if (child_max_key > get_node_max_key(right_child))
+    {
+        // Move the current right child to the last cell
+        *internal_node_child(parent, orignal_num_keys) = right_child_page_num;
+        *internal_node_key(parent, orignal_num_keys) = get_node_max_key(right_child);
+        // Set the new child as the rightmost child
+        *internal_node_right_child(parent) = child_page_num;
+    }
+    else
+    {
+        // Make space for the new cell
+        for (uint32_t i = orignal_num_keys; i > index; i--)
+        {
+            void *destination = internal_node_cell(parent, i);
+            void *source = internal_node_cell(parent, i - 1);
+            memcpy(destination, source, INTERNAL_NODE_CELL_SIZE);
+        }
+        // Insert the new child at the correct position
+        *internal_node_child(parent, index) = child_page_num;
+        *internal_node_key(parent, index) = child_max_key;
+    }
+
+    // Update the child's parent pointer to the parent node
+    void *child_node = get_page(table->pager, child_page_num);
+    *node_parent(child_node) = parent_page_num;
+}
 /**
  * Splits a full leaf node and inserts a new key-value pair into the appropriate split node.
  *
@@ -974,12 +1140,13 @@ void create_new_root(Table *table, uint32_t right_child_page_num)
 void leaf_node_split_insert(Cursor *cursor, uint32_t key, Row *value)
 {
     void *old_node = get_page(cursor->table->pager, cursor->page_num); // Get the current full leaf node
-
+    uint32_t old_max = get_node_max_key(old_node);
     // Allocate a new page for the split node
     uint32_t new_page_num = get_unused_page_num(cursor->table->pager); // load an unused page from memory
     void *new_node = get_page(cursor->table->pager, new_page_num);
     initialize_leaf_node(new_node); // Initialize the new leaf node
-
+    // we are copying parent of old node to new_node as they will have sme parent
+    *node_parent(new_node) = *node_parent(old_node);
     // give whatever is stored in old_node next leaf to new_node next leaf.
     *leaf_node_next_leaf(new_node) = *leaf_node_next_leaf(old_node);
     *leaf_node_next_leaf(old_node) = new_page_num; // old node points to new node.
@@ -1029,8 +1196,13 @@ void leaf_node_split_insert(Cursor *cursor, uint32_t key, Row *value)
         return create_new_root(cursor->table, new_page_num);
     else
     {
-        printf("Need to implement updating parent split \n");
-        exit(EXIT_FAILURE);
+        uint32_t parent_page_num = *node_parent(old_node);
+        uint32_t new_max = get_node_max_key(old_node);
+        void *parent = get_page(cursor->table->pager, parent_page_num);
+
+        update_internal_node_key(parent, old_max, new_max);
+        internal_node_insert(cursor->table, parent_page_num, new_page_num);
+        return;
     }
 }
 
