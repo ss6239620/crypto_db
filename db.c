@@ -44,7 +44,9 @@ typedef struct Row_t Row;
 enum StatementType_t
 {
     STATEMENT_INSERT,
-    STATEMENT_SELECT
+    STATEMENT_SELECT,
+    STATEMENT_UPDATE,
+    STATEMENT_DELETE
 };
 typedef enum StatementType_t StatementType;
 
@@ -68,7 +70,9 @@ typedef enum PrepareResult_t PrepareResult;
 enum ExecuteResult_t
 {
     EXECUTE_SUCCESS,
-    EXECUTE_TABLE_FULL
+    EXECUTE_TABLE_FULL,
+    EXECUTE_DUPLICATE_KEY,
+    EXECUTE_NOT_FOUND
 };
 typedef enum ExecuteResult_t ExecuteResult;
 
@@ -128,7 +132,13 @@ const uint32_t COMMON_NODE_HEADER_SIZE = NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_
 const uint32_t LEAF_NODE_NUM_CELLS_SIZE = sizeof(uint32_t);
 const uint32_t LEAF_NODE_NUM_CELLS_OFFSET = COMMON_NODE_HEADER_SIZE;
 
-const uint32_t LEAF_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE;
+/*
+To scan the entire table, we need to jump to the second leaf node after we reach the end of the first. To do that, we’re going to save a new field in the leaf node header called “next_leaf”, which will hold the page number of the leaf’s sibling node on the right. The rightmost leaf node will have a next_leaf value of 0 to denote no sibling (page 0 is reserved for the root node of the table anyway).
+*/
+const uint32_t LEAF_NODE_NEXT_LEAF_SIZE = sizeof(uint32_t);
+const uint32_t LEAF_NODE_NEXT_LEAF_OFFSET = LEAF_NODE_NUM_CELLS_SIZE + LEAF_NODE_NUM_CELLS_OFFSET;
+
+const uint32_t LEAF_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE + LEAF_NODE_NEXT_LEAF_SIZE;
 // Leaft Node Header Layout end here
 
 // Leaf Node Body layout start here (Now the whole page from here is generally used to store cells(Key+value))
@@ -143,7 +153,47 @@ const uint32_t LEAF_NODE_CELL_SIZE = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
 const uint32_t LEAF_NODE_SPACE_FOR_CELL = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
 // Max that can be occupied in one page can be found by dividing Available space by cell size
 const uint32_t LEAF_NODE_MAX_CELL = LEAF_NODE_SPACE_FOR_CELL / LEAF_NODE_CELL_SIZE;
+const uint32_t LEAF_NODE_RIGHT_SPLIT_COUNT = (LEAF_NODE_MAX_CELL + 1) / 2; // leaf node right split count
+// leaf node left split count
+const uint32_t LEAF_NODE_LEFT_SPLIT_COUNT = (LEAF_NODE_MAX_CELL + 1) - (LEAF_NODE_RIGHT_SPLIT_COUNT);
 // Leaf Node Body layout end here
+
+/**
+ * is_root_node - Checks if the given node is the root of the B-tree.
+ *
+ * @node: Pointer to the node in memory.
+ *
+ * Return: `true` if the node is a root node, otherwise `false`.
+ *
+ * Description:
+ * - Reads the `IS_ROOT_OFFSET` location in memory, which stores whether
+ *   the node is a root (1) or not (0).
+ * - Converts the stored `uint8_t` value to a boolean (`true` or `false`).
+ */
+bool is_root_node(void *node)
+{
+    uint8_t value = *((uint8_t *)(node + IS_ROOT_OFFSET));
+    return (bool)value;
+}
+
+/**
+ * set_node_root - Sets or clears the root status of a given node.
+ *
+ * @node: Pointer to the node in memory.
+ * @is_root: Boolean value indicating whether the node should be a root (`true`) or not (`false`).
+ *
+ * Return: None.
+ *
+ * Description:
+ * - Writes the `is_root` flag (converted to `uint8_t`) to `IS_ROOT_OFFSET`.
+ * - A value of `1` means the node is a root, and `0` means it is not.
+ * - Used when creating a new root or changing the tree structure.
+ */
+void set_node_root(void *node, bool is_root)
+{
+    uint8_t value = is_root;
+    *((uint8_t *)(node + IS_ROOT_OFFSET)) = value;
+}
 
 /**
  * @brief Returns a pointer to the number of cells (key-value pairs) in a leaf node.
@@ -213,6 +263,65 @@ void *leaf_node_value(void *node, uint32_t cell_num)
 }
 
 /**
+ * @brief  Retrieves the pointer to the next leaf node in a B-tree.
+ *
+ * Functionality:
+ *      - A **leaf node** in a B-tree may have a pointer to the **next leaf node** for efficient traversal.
+ *      - This function returns a pointer to that **next leaf node offset**.
+ *      - Used in **sequential scans** where nodes are linked for faster ordered access.
+ *
+ * @param node A pointer to the current leaf node in the B-tree.
+ *
+ * @return `uint32_t*` A pointer to the memory location storing the next leaf node's page number.
+ *
+ * Example Usage:
+ * ```
+ * uint32_t next_leaf = *leaf_node_next_leaf(current_node);
+ * if (next_leaf != 0) {
+ *     void *next_node = get_page(pager, next_leaf);
+ * }
+ * ```
+ */
+uint32_t *leaf_node_next_leaf(void *node)
+{
+    return node + LEAF_NODE_NEXT_LEAF_OFFSET;
+}
+
+/**
+ * @brief Retrieves the node type from a given node pointer.
+ *
+ * This function takes a pointer to a node and extracts its type by
+ * reading the value at the specified offset (`NODE_TYPE_OFFSET`).
+ * The extracted value is then cast to the `NodeType` enumeration.
+ *
+ * @param node Pointer to the node whose type is to be determined.
+ * @param node_type Unused parameter, likely intended for future use
+ *                  or mistakenly included.
+ * @return NodeType The extracted node type.
+ */
+NodeType get_node_type(void *node)
+{
+    uint8_t value = *((uint8_t *)node + NODE_TYPE_OFFSET); // this fetch 0-1 byte from metadata in leaf node(aka page).
+    return (NodeType)value;                                // Cast the extracted value to the NodeType enumeration and return it
+}
+
+/**
+ * @brief Sets the node type for a given node pointer.
+ *
+ * This function assigns the provided node type to the specified memory
+ * location within the node structure. It writes the `node_type` value
+ * at the offset `NODE_TYPE_OFFSET` from the node's base address.
+ *
+ * @param node Pointer to the node whose type is to be set.
+ * @param node_type The node type to be assigned.
+ */
+void set_node_type(void *node, NodeType node_type)
+{
+    uint8_t value = node_type;                     // cast node_type which is 4 byte to 1 byte.
+    *((uint8_t *)node + NODE_TYPE_OFFSET) = value; // this set 1 byte node type to metadata in leaf node(aka page).
+}
+
+/**
  * @brief Initializes a leaf node (aka page) by setting the number of cells to zero.
  *
  * This function prepares a new leaf node by ensuring it starts with zero key-value pairs.
@@ -220,8 +329,195 @@ void *leaf_node_value(void *node, uint32_t cell_num)
  *
  * @param node A pointer to the beginning of the leaf node (aka page) in memory.
  */
-void initialize_leaf_node(void *node) { *leaf_node_num_cells(node) = 0; }
+void initialize_leaf_node(void *node)
+{
+    set_node_type(node, LEAF_NODE);
+    set_node_root(node, false);
+    *leaf_node_num_cells(node) = 0;
+    *leaf_node_next_leaf(node) = 0;
+}
 
+/*
+Internal Node constant start here
+*/
+// Internal Node header layout start here
+// The next 4 bytes (offset 6-9) store a number of keys present in current Internal node(aka page).
+const uint32_t INTERNAL_NODE_NUM_KEY_SIZE = sizeof(uint32_t);
+const uint32_t INTERNAL_NODE_NUM_KEY_SIZE_OFFSET = COMMON_NODE_HEADER_SIZE;
+// The next 4 bytes (offset 10-13) store a Right child present in current Internal node(aka page).
+const uint32_t INTERNAL_NODE_RIGHT_CHILD_SIZE = sizeof(uint32_t);
+const uint32_t INTERNAL_NODE_RIGHT_CHILD_OFFSET = INTERNAL_NODE_NUM_KEY_SIZE + INTERNAL_NODE_NUM_KEY_SIZE_OFFSET;
+// Total Internal Node header size
+const uint32_t INTERNAL_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE + INTERNAL_NODE_NUM_KEY_SIZE + INTERNAL_NODE_RIGHT_CHILD_SIZE;
+// Internal Node header layout end here
+
+/*
+Internal Node Body layout start here
+Notice our huge branching factor. Because each child pointer / key pair is so small, we can fit 510 keys and 511 child pointers in each internal node. That means we’ll never have to traverse many layers of the tree to find a given key!
+*/
+const uint32_t INTERNAL_NODE_KEY_SIZE = sizeof(uint32_t);
+const uint32_t INTERNAL_NODE_CHILD_SIZE = sizeof(uint32_t);
+const uint32_t INTERNAL_NODE_CELL_SIZE = INTERNAL_NODE_CHILD_SIZE + INTERNAL_NODE_KEY_SIZE;
+// Internal Node Body layout end here
+
+/*
+Methods for reading and writing to an internal node:
+*/
+
+/**
+ * Retrieves a pointer to the number of keys stored in an internal node.
+ *
+ * @param node Pointer to the internal node in memory.
+ * @return Pointer to the memory location where the number of keys is stored.
+ *
+ * The number of keys in an internal node is stored at a fixed offset
+ * (`INTERNAL_NODE_NUM_KEY_SIZE_OFFSET`) after the common node header.
+ * This function helps in accessing and modifying the key count directly.
+ */
+uint32_t *internal_node_num_keys(void *node)
+{
+    return node + INTERNAL_NODE_NUM_KEY_SIZE_OFFSET;
+}
+
+/**
+ * Retrieves a pointer to the rightmost child pointer in an internal node.
+ *
+ * @param node Pointer to the internal node in memory.
+ * @return Pointer to the memory location where the rightmost child is stored.
+ *
+ * In an internal node, the rightmost child pointer is stored at a fixed offset
+ * (`INTERNAL_NODE_RIGHT_CHILD_OFFSET`) after the common node header and key count.
+ * This function allows access to that pointer for reading or updating.
+ */
+uint32_t *internal_node_right_child(void *node)
+{
+    return node + INTERNAL_NODE_RIGHT_CHILD_OFFSET;
+}
+
+/**
+ * Retrieves a pointer to a specific key-child pair (cell) in an internal node.
+ *
+ * @param node Pointer to the internal node in memory.
+ * @param cell_num The index of the key-child pair within the internal node.
+ * @return Pointer to the memory location where the specified cell is stored.
+ *
+ * Internal nodes store child pointers and keys in pairs, starting after the node header.
+ * Each cell consists of a child pointer followed by a key. This function calculates the
+ * correct memory location based on the given cell index.
+ */
+uint32_t *internal_node_cell(void *node, uint32_t cell_num)
+{
+    return node + INTERNAL_NODE_HEADER_SIZE + cell_num * INTERNAL_NODE_CELL_SIZE;
+}
+
+/**
+ * Retrieves a pointer to a specific child pointer in an internal node.
+ *
+ * @param node Pointer to the internal node in memory.
+ * @param child_num The index of the child pointer to retrieve.
+ * @return Pointer to the memory location where the specified child pointer is stored.
+ *
+ * Internal nodes store child pointers in two locations:
+ * - The first `num_key` children are stored within cells (`internal_node_cell`).
+ * - The rightmost child (which has no associated key) is stored separately
+ *   at `internal_node_right_child`.
+ *
+ * This function ensures that `child_num` is within a valid range before accessing it.
+ * If `child_num` is equal to `num_key`, it returns the rightmost child pointer.
+ * Otherwise, it returns the pointer to the corresponding child-key pair.
+ */
+uint32_t *internal_node_child(void *node, uint32_t child_num)
+{
+    uint32_t num_key = *internal_node_num_keys(node);
+    if (child_num > num_key)
+    {
+        printf("Tried to acess child_num %d > num_key %d", child_num, num_key);
+        exit(EXIT_FAILURE);
+    }
+    // if child_num is equal to number of keys return the right most child
+    else if (child_num == num_key)
+        return internal_node_right_child(node);
+    else
+        return internal_node_cell(node, child_num); // find the cell of key-value pair in internal node.
+}
+
+/**
+ * internal_node_key - Retrieves a pointer to the key at a given index in an internal node.
+ *
+ * @node: Pointer to the internal node (page) in memory.
+ * @key_num: Index of the key to retrieve.
+ *
+ * Return: A pointer to the key at the specified index.
+ *
+ * Description:
+ * - Internal nodes store key-value pairs, where each key is associated with a child pointer.
+ * - Each key is stored after its corresponding child pointer within the node.
+ * - This function calculates the address of the key by getting the address of the cell
+ *   at `key_num` using `internal_node_cell()` and then adding `INTERNAL_NODE_CHILD_SIZE`
+ *   to skip the child pointer.
+ *
+ * Example:
+ * Given an internal node storing keys `[10, 20, 30]` with corresponding children,
+ * calling `internal_node_key(node, 1)` will return the address of key `20`.
+ */
+uint32_t *internal_node_key(void *node, uint32_t key_num)
+{
+    return internal_node_cell(node, key_num) + INTERNAL_NODE_CHILD_SIZE;
+}
+
+/**
+ * initialize_internal_node - Initializes a new internal node in the B-tree.
+ *
+ * @node: Pointer to the memory location of the node.
+ *
+ * Return: None.
+ *
+ * Description:
+ * - Sets the node type to `INTERNAL_NODE`, meaning it will store keys and child pointers.
+ * - Marks the node as a non-root initially (`set_node_root(node, false)`).
+ * - Initializes the number of keys in the internal node to `0` since it's newly created.
+ * - This function is typically called when a new internal node is allocated in the tree.
+ *
+ * Example:
+ * ```
+ * void *new_node = get_page(pager, new_page_num);
+ * initialize_internal_node(new_node);
+ * ```
+ */
+void initialize_internal_node(void *node)
+{
+    set_node_type(node, INTERNAL_NODE);
+    set_node_root(node, false);
+    *internal_node_num_keys(node) = 0;
+}
+
+/**
+ * get_node_key - Retrieves the largest key stored in a given node.
+ *
+ * @node: Pointer to the node (either internal or leaf) in memory.
+ *
+ * Return: The largest key in the node.
+ *
+ * Description:
+ * - If the node is an internal node, the largest key is the last key in the key array.
+ * - If the node is a leaf node, the largest key is the last key in the key-value pairs.
+ * - Uses `internal_node_key()` and `leaf_node_key()` to fetch the correct key.
+ * - Assumes that the node contains at least one key.
+ *
+ * Example:
+ * Given an internal node with keys `[10, 20, 30]`, calling `get_node_key(node)`
+ * will return `30`.
+ */
+uint32_t get_node_max_key(void *node)
+{
+    switch (get_node_type(node))
+    {
+    case INTERNAL_NODE:
+        return *internal_node_key(node, *internal_node_num_keys(node) - 1);
+    case LEAF_NODE:
+        return *leaf_node_key(node, *leaf_node_num_cells(node) - 1);
+    }
+}
 struct Pager_t
 {
     int file_descriptor;          // 4 bytes
@@ -266,7 +562,7 @@ void *get_page(Pager *pager, uint32_t page_num)
 {
     if (page_num > TABLE_MAX_PAGES)
     {
-        printf("Tride to fetch page total page. %d > %d", page_num, TABLE_MAX_PAGES);
+        printf("Tried to fetch page total page. %d > %d", page_num, TABLE_MAX_PAGES);
         exit(EXIT_FAILURE);
     }
 
@@ -306,6 +602,130 @@ void *get_page(Pager *pager, uint32_t page_num)
 }
 
 /**
+ * @brief Searches for a key within a leaf node using binary search.
+ *
+ * This function performs a binary search on a leaf node to locate a given key.
+ * If the key is found, it returns a cursor pointing to its position.
+ * If the key is not found, the cursor points to the position where
+ * the key would be inserted.
+ *
+ * @param table Pointer to the table containing the B-tree.
+ * @param page_num Page number of the leaf node to search.
+ * @param key The key to find in the leaf node.
+ * @return Cursor* A pointer to a newly allocated cursor pointing to
+ *         the key's position in the leaf node.
+ */
+Cursor *find_leaf_node(Table *table, uint32_t page_num, uint32_t key)
+{
+    void *node = get_page(table->pager, page_num);
+    uint32_t num_cell = *leaf_node_num_cells(node);
+
+    Cursor *cursor = malloc(sizeof(Cursor));
+    cursor->table = table;
+    cursor->page_num = page_num;
+
+    uint32_t min_index = 0;
+    uint32_t one_past_max_index = num_cell;
+
+    // check until min_index equals to one_past_max_index
+    while (min_index != one_past_max_index)
+    {
+        uint32_t mid_index = (min_index + one_past_max_index) / 2;
+        uint32_t key_at_mid_index = *leaf_node_key(node, mid_index);
+        if (key_at_mid_index == key)
+        {
+            cursor->cell_num = mid_index;
+            return cursor;
+        }
+        if (key < key_at_mid_index)
+            one_past_max_index = mid_index;
+        else
+            min_index = mid_index + 1;
+    }
+    cursor->cell_num = min_index;
+    return cursor;
+}
+
+/**
+ * @brief  Finds the correct child node to traverse in an internal node using binary search.
+ *
+ * Functionality:
+ *      - Retrieves the internal node from the given page number.
+ *      - Uses **binary search** to find the correct child pointer for the key.
+ *      - If the key is **less than or equal** to the key at the current index, search in the left half.
+ *      - If the key is **greater**, search in the right half.
+ *      - Returns a cursor pointing to the correct child node that should contain the key.
+ *
+ * @param table A pointer to the table structure containing the B-tree.
+ * @param page_num The page number of the internal node to search in.
+ * @param key The key being searched for.
+ *
+ * @return `Cursor*` A pointer to a Cursor representing the correct child node.
+ *
+ * Example Usage:
+ * ```
+ * Cursor *cursor = find_internal_node(table, root_page_num, key);
+ * ```
+ */
+Cursor *find_internal_node(Table *table, uint32_t page_num, uint32_t key)
+{
+    void *node = get_page(table->pager, page_num);
+    uint32_t num_keys = *(internal_node_num_keys(node));
+
+    /* Binary search to find index of child to search */
+    uint32_t min_index = 0;
+    uint32_t max_index = num_keys;
+    while (min_index != max_index)
+    {
+        uint32_t index = (min_index + max_index) / 2;
+        uint32_t key_at_index = *(leaf_node_key(node, index));
+        if (key <= key_at_index)
+            max_index = index;
+        else
+            min_index = index + 1;
+    }
+    // remember that the children of an internal node can be either leaf nodes or more internal nodes
+    uint32_t child_page_num = *internal_node_child(node, min_index);
+    void *child = get_page(table->pager, child_page_num);
+    switch (get_node_type(child))
+    {
+    case LEAF_NODE:
+        return find_leaf_node(table, child_page_num, key);
+    case INTERNAL_NODE:
+        return find_internal_node(table, child_page_num, key);
+    }
+}
+
+/**
+ * @brief Finds the cursor pointing to the position of a given key in the table.
+ *
+ * This function searches for the specified key within the table's B-tree.
+ * If the root node is a leaf node, it delegates the search to `find_leaf_node`.
+ * If the root node is an internal node, the function currently exits
+ * with an error message, as internal node searching is not implemented.
+ *
+ * @param table Pointer to the table structure containing the B-tree.
+ * @param key The key to search for in the table.
+ * @return Cursor* Pointer to the cursor indicating the key's location in the table.
+ *         If the key is not found, the cursor points to the position where
+ *         the key would be inserted.
+ */
+Cursor *find_table(Table *table, uint32_t key)
+{
+    uint32_t root_page_num = table->root_page_num;
+    void *root_node = get_page(table->pager, root_page_num);
+
+    if (get_node_type(root_node) == LEAF_NODE)
+    {
+        return find_leaf_node(table, root_page_num, key);
+    }
+    else
+    {
+        return find_internal_node(table, root_page_num, key);
+    }
+}
+
+/**
  * @brief Initializes a Cursor that points to the first row of a table.
  *
  * Functionality:
@@ -321,16 +741,12 @@ void *get_page(Pager *pager, uint32_t page_num)
  */
 Cursor *start_table(Table *table)
 {
-    Cursor *cursor = malloc(sizeof(Cursor)); // Allocate memory
-    cursor->table = table;                   // The cursor stores a reference to the table.
-    cursor->page_num = table->root_page_num; // Start at the root page of the table
-    cursor->cell_num = 0;                    // Start at the first cell (row) in the root page
+    Cursor *cursor = find_table(table, 0);
 
-    // Get the root page (which is a leaf node in this case)
-    void *root_node = get_page(table->pager, table->root_page_num);
-    uint32_t num_cell = *leaf_node_num_cells(root_node); // Get the number of cells (rows) in the root node
-    // If there are no rows, mark the cursor as being at the end of the table
-    cursor->end_of_table = (num_cell == 0);
+    void *node = get_page(table->pager, cursor->page_num);
+    uint32_t num_cells = *leaf_node_num_cells(node);
+    cursor->end_of_table = (num_cells == 0);
+
     return cursor;
 }
 
@@ -378,13 +794,26 @@ void cursor_advance(Cursor *cursor)
     cursor->cell_num += 1; // Move the cursor to the next cell
     // If the cursor moves past the last cell in the node, mark the end of the table
     if (cursor->cell_num >= (*leaf_node_num_cells(node)))
-        cursor->end_of_table = true;
+    {
+        /* Advance to next leaf node */
+        uint32_t next_page_num = *leaf_node_next_leaf(node);
+        if (next_page_num == 0)
+        {
+            /* This was rightmost leaf */
+            cursor->end_of_table = true;
+        }
+        else
+        {
+            cursor->page_num = next_page_num;
+            cursor->cell_num = 0;
+        }
+    }
 }
 
 // This function print select result.
 void print_row(Row *row)
 {
-    printf("%d, %s, %s\n", row->id, row->username, row->email);
+    printf("(%d, %s, %s)\n", row->id, row->username, row->email);
 }
 
 /*
@@ -444,10 +873,11 @@ Page_open perform following functionality:
 Pager *page_open(const char *filename)
 {
     int fd = open(filename,
-                  O_RDWR |     // Open for reading and writing
-                      O_CREAT, // Create file if it does not exist
-                  S_IWUSR |    // User write permission
-                      S_IRUSR  // User read permission
+                  O_RDWR |      // Open for reading and writing
+                      O_CREAT | // Create file if it does not exist
+                      O_BINARY, // Binary mode (no CRLF conversions) forgot to include this almost crashed o my windows fuck windows check bug.txt for updates (lol).
+                  S_IWUSR |     // User write permission
+                      S_IRUSR   // User read permission
     );
     if (fd == -1)
     {
@@ -462,9 +892,9 @@ Pager *page_open(const char *filename)
     pager->file_descriptor = fd;
     pager->file_length = file_length;
     pager->num_pages = (file_length / PAGE_SIZE);
-
     if (file_length % PAGE_SIZE)
     {
+        printf("%d\n", file_length);
         printf("Db file does not have whole number pages it is likely corrupted\n");
         exit(EXIT_FAILURE);
     }
@@ -498,11 +928,123 @@ Table *db_open(const char *filename)
         // New database file. Initialize page 0 as leaf node.
         void *root = get_page(pager, 0);
         initialize_leaf_node(root);
+        set_node_root(root, true);
     }
 
     return table;
 }
 
+uint32_t get_unused_page_num(Pager *pager)
+{
+    return pager->num_pages;
+}
+
+void create_new_root(Table *table, uint32_t right_child_page_num)
+{
+    void *root = get_page(table->pager, table->root_page_num);
+    void *root_right_child = get_page(table->pager, right_child_page_num);
+    uint32_t left_child_page_num = get_unused_page_num(table->pager);
+    void *left_child = get_page(table->pager, left_child_page_num); // load an unused page from memory
+
+    // Left child has data copied from old root
+    memcpy(left_child, root, PAGE_SIZE);
+    set_node_root(left_child, false);
+
+    // Root node is a new internal node with one key and two children
+    initialize_internal_node(root);
+    set_node_root(root, true);
+    *internal_node_num_keys(root) = 1;
+    *internal_node_child(root, 0) = left_child_page_num;
+    uint32_t left_child_max_key = get_node_max_key(left_child);
+    *internal_node_key(root, 0) = left_child_max_key;
+    *internal_node_right_child(root) = right_child_page_num;
+}
+
+/**
+ * Splits a full leaf node and inserts a new key-value pair into the appropriate split node.
+ *
+ * @param cursor Pointer to the cursor indicating the insertion position.
+ * @param key The key to insert into the leaf node.
+ * @param value Pointer to the row data to be stored in the leaf node.
+ *
+ * @note This function handles the case when a leaf node is full and needs to be split.
+ *       It creates a new node, redistributes existing keys between the old and new node,
+ *       inserts the new key in the appropriate location, and updates the parent if needed.
+ */
+void leaf_node_split_insert(Cursor *cursor, uint32_t key, Row *value)
+{
+    void *old_node = get_page(cursor->table->pager, cursor->page_num); // Get the current full leaf node
+
+    // Allocate a new page for the split node
+    uint32_t new_page_num = get_unused_page_num(cursor->table->pager); // load an unused page from memory
+    void *new_node = get_page(cursor->table->pager, new_page_num);
+    initialize_leaf_node(new_node); // Initialize the new leaf node
+
+    // give whatever is stored in old_node next leaf to new_node next leaf.
+    *leaf_node_next_leaf(new_node) = *leaf_node_next_leaf(old_node);
+    *leaf_node_next_leaf(old_node) = new_page_num; // old node points to new node.
+
+    // Redistribute keys between the old and new node
+    for (int32_t i = LEAF_NODE_MAX_CELL; i >= 0; i--)
+    {
+        void *destination_node;
+
+        // Determine if the key should go to the new or old node
+        if (i >= LEAF_NODE_LEFT_SPLIT_COUNT)
+            destination_node = new_node; // upper half
+        else
+            destination_node = old_node; // lower half
+
+        // Get the index within the respective node
+        uint32_t index_within_node = i % LEAF_NODE_LEFT_SPLIT_COUNT;
+        void *destination = leaf_node_cell(destination_node, index_within_node);
+
+        /*
+        To better understand this logic below is example:
+            Assume the following initial leaf node (max 4 cells), and we want to insert key 25 at index 2:
+                  Index	    Old Keys Before Insert	    New Keys After Insert
+                    0	            10	                        10
+                    1	            20	                        20
+                    2	            30	                        25 (Inserted)
+                    3	            40	                        30
+                    4	            50	                        40
+                    5	        (Overflow)	                    50
+        */
+        if (i == cursor->cell_num)
+        {
+            serialize_row(value, leaf_node_value(destination_node, index_within_node)); // Insert the new key-value pair at the correct location
+            *leaf_node_key(destination_node, index_within_node) = key;
+        }
+        else if (i > cursor->cell_num)
+            memcpy(destination, leaf_node_cell(old_node, i - 1), LEAF_NODE_CELL_SIZE); // Shift right
+        else
+            memcpy(destination, leaf_node_cell(old_node, i), LEAF_NODE_CELL_SIZE); // Copy existing
+    }
+    // Update the number of cells in both nodes after splitting
+    *(leaf_node_num_cells(old_node)) = LEAF_NODE_LEFT_SPLIT_COUNT;
+    *(leaf_node_num_cells(new_node)) = LEAF_NODE_RIGHT_SPLIT_COUNT;
+
+    // If the old node was the root, create a new root
+    if (is_root_node(old_node))
+        return create_new_root(cursor->table, new_page_num);
+    else
+    {
+        printf("Need to implement updating parent split \n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+/**
+ * Inserts a key-value pair into a leaf node at the specified cursor position.
+ * If the node is full, it prints a message and exits (branching not implemented yet).
+ *
+ * @param cursor Pointer to the cursor indicating the insertion position.
+ * @param key The key to insert into the leaf node.
+ * @param value Pointer to the row data to be stored in the leaf node.
+ *
+ * @note If the insertion position is not at the end, existing entries are shifted to make space.
+ * @note If the leaf node is full, the function exits with an error message.
+ */
 void leaf_node_insert(Cursor *cursor, uint32_t key, Row *value)
 {
     void *node = get_page(cursor->table->pager, cursor->page_num);
@@ -510,9 +1052,8 @@ void leaf_node_insert(Cursor *cursor, uint32_t key, Row *value)
     uint32_t num_cell = *leaf_node_num_cells(node);
     if (num_cell >= LEAF_NODE_MAX_CELL)
     {
-        // Node (page) full need branching.
-        printf("Needs to implement branching.\n");
-        exit(EXIT_FAILURE);
+        leaf_node_split_insert(cursor, key, value);
+        return; // resaon for bug there wasnt return here
     }
     if (cursor->cell_num < num_cell)
     {
@@ -711,15 +1252,48 @@ void print_constant()
     printf("LEAF_NODE_CELL_SIZE: %d\n", LEAF_NODE_CELL_SIZE);
     printf("LEAF_NODE_SPACE_FOR_CELLS: %d\n", LEAF_NODE_SPACE_FOR_CELL);
     printf("LEAF_NODE_MAX_CELLS: %d\n", LEAF_NODE_MAX_CELL);
+    printf("LEAF_NODE_LEFT_SPLIT_COUNT: %d\n", LEAF_NODE_LEFT_SPLIT_COUNT);
+    printf("LEAF_NODE_RIGHT_SPLIT_COUNT: %d\n", LEAF_NODE_RIGHT_SPLIT_COUNT);
 }
 
-void print_leaf_node(void *node)
+void indent(uint32_t level)
 {
-    uint32_t num_cells = *leaf_node_num_cells(node);
-    for (uint32_t i = 0; i < num_cells; i++)
+    for (uint32_t i = 0; i < level; i++)
+        printf(" ");
+}
+
+void print_tree(Pager *pager, uint32_t page_num, uint32_t indentation_level)
+{
+    void *node = get_page(pager, page_num);
+    uint32_t num_keys, child;
+
+    switch (get_node_type(node))
     {
-        uint32_t key = *leaf_node_key(node, i);
-        printf(" - %d : %d", i, key);
+    case (LEAF_NODE):
+        num_keys = *leaf_node_num_cells(node);
+        indent(indentation_level);
+        printf("- leaf (size %d)\n", num_keys);
+        for (uint32_t i = 0; i < num_keys; i++)
+        {
+            indent(indentation_level + 1);
+            printf("- %d\n", *leaf_node_key(node, i));
+        }
+        break;
+    case (INTERNAL_NODE):
+        num_keys = *internal_node_num_keys(node);
+        indent(indentation_level);
+        printf("- internal (size %d)\n", num_keys);
+        for (uint32_t i = 0; i < num_keys; i++)
+        {
+            child = *internal_node_child(node, i);
+            print_tree(pager, child, indentation_level + 1);
+
+            indent(indentation_level + 1);
+            printf("- key %d\n", *internal_node_key(node, i));
+        }
+        child = *internal_node_right_child(node);
+        print_tree(pager, child, indentation_level + 1);
+        break;
     }
 }
 
@@ -739,7 +1313,7 @@ MetaCommandResult do_meta_command(InputBuffer *input_buffer, Table *table)
     else if (strcmp(input_buffer->buffer, ".btree") == 0)
     {
         printf("Tree:\n");
-        print_leaf_node(get_page(table->pager, 0));
+        print_tree(table->pager, 0, 0);
         return META_COMMAND_SUCCESS;
     }
     else
@@ -789,31 +1363,178 @@ PrepareResult prepare_insert(InputBuffer *input_buffer, Statement *statement)
     return PREPARE_SUCCESS;
 }
 
+PrepareResult preare_update(InputBuffer *input_buffer, Statement *statement)
+{
+    statement->type = STATEMENT_UPDATE;
+
+    // Tokenizing input string
+    char *update_keyword = strtok(input_buffer->buffer, " ");
+    char *username = strtok(NULL, " ");
+    char *email = strtok(NULL, " ");
+    char *where_keyword = strtok(NULL, " ");
+    char *id_token = strtok(NULL, " "); // Should contain "id=1"
+
+    // Validate required keywords
+    if (update_keyword == NULL || username == NULL || email == NULL || where_keyword == NULL || id_token == NULL)
+    {
+        return PREPARE_SYNTAX_ERROR;
+    }
+
+    // Ensure 'where' clause is correctly formatted
+    if (strcmp(where_keyword, "where") != 0)
+    {
+        return PREPARE_SYNTAX_ERROR;
+    }
+
+    // Split "id=1" into "id" and "1"
+    char *id_key = strtok(id_token, "=");
+    char *id_value = strtok(NULL, "=");
+
+    if (id_key == NULL || id_value == NULL || strcmp(id_key, "id") != 0)
+    {
+        return PREPARE_SYNTAX_ERROR;
+    }
+
+    // Convert ID to integer
+    int id = atoi(id_value);
+    if (id < 0)
+        return PREPARE_NEGATIVE_ID;
+
+    // Validate username and email length
+    if (strlen(username) > COLUMN_USERNAME_SIZE || strlen(email) > COLUMN_EMAIL_SIZE)
+    {
+        return PREPARE_STRING_TOO_LONG;
+    }
+
+    // Assign values to the statement
+    statement->row_to_insert.id = id;
+    strcpy(statement->row_to_insert.username, username);
+    strcpy(statement->row_to_insert.email, email);
+
+    return PREPARE_SUCCESS;
+}
+
+PrepareResult prepare_delete(InputBuffer *input_buffer, Statement *statement)
+{
+    statement->type = STATEMENT_DELETE;
+
+    char *delete_keyword = strtok(input_buffer->buffer, " ");
+    char *where_keyword = strtok(NULL, " ");
+    char *id_token = strtok(NULL, " ");
+    // Validate required keywords
+    if (delete_keyword == NULL || where_keyword == NULL || id_token == NULL)
+    {
+        return PREPARE_SYNTAX_ERROR;
+    }
+
+    char *id_key = strtok(id_token, "=");
+    char *id_value = strtok(NULL, "=");
+
+    if (id_key == NULL || id_value == NULL || strcmp(id_key, "id") != 0)
+    {
+        return PREPARE_SYNTAX_ERROR;
+    }
+
+    // Convert ID to integer
+    int id = atoi(id_value);
+    if (id < 0)
+        return PREPARE_NEGATIVE_ID;
+
+    statement->row_to_insert.id = id;
+    return PREPARE_SUCCESS;
+}
+
 PrepareResult prepare_statement(InputBuffer *input_buffer, Statement *statement)
 {
     if (strncmp(input_buffer->buffer, "insert", 6) == 0)
     {
         return prepare_insert(input_buffer, statement);
     }
-    if (strcmp(input_buffer->buffer, "select") == 0)
+    else if (strncmp(input_buffer->buffer, "update", 6) == 0)
+    {
+        return preare_update(input_buffer, statement);
+    }
+    else if (strncmp(input_buffer->buffer, "delete", 6) == 0)
+    {
+        return prepare_delete(input_buffer, statement);
+    }
+    else if (strcmp(input_buffer->buffer, "select") == 0)
     {
         statement->type = STATEMENT_SELECT;
         return PREPARE_SUCCESS;
     }
-    return PREPARE_UNRECOGNIZED_STATEMENT;
+    else
+        return PREPARE_UNRECOGNIZED_STATEMENT;
 }
 
 ExecuteResult execute_insert(Statement *statement, Table *table)
 {
-    void *node = get_page(table->pager, table->root_page_num);
-    if ((*leaf_node_num_cells(node) >= LEAF_NODE_MAX_CELL))
-        return EXECUTE_TABLE_FULL;
 
     Row *row_to_insert = &(statement->row_to_insert);
-    Cursor *cursor = end_table(table);
+    uint32_t key_to_insert = row_to_insert->id;
+    Cursor *cursor = find_table(table, key_to_insert);
+
+    void *node = get_page(cursor->table->pager, cursor->page_num);
+    uint32_t num_cells = *leaf_node_num_cells(node);
+
+    if (cursor->cell_num < num_cells)
+    {
+        uint32_t key_at_index = *leaf_node_key(node, cursor->cell_num);
+        if (key_at_index == key_to_insert)
+            return EXECUTE_DUPLICATE_KEY;
+    }
 
     leaf_node_insert(cursor, row_to_insert->id, row_to_insert);
 
+    free(cursor);
+    return EXECUTE_SUCCESS;
+}
+
+ExecuteResult execute_update(Statement *statement, Table *table)
+{
+    Row *row_to_update = &(statement->row_to_insert);
+    uint32_t key_to_update = row_to_update->id;
+    Cursor *cursor = find_table(table, key_to_update);
+
+    void *node = get_page(cursor->table->pager, cursor->page_num);
+
+    void *row_location = leaf_node_value(node, cursor->cell_num);
+
+    memcpy(row_location + USERNAME_OFFSET, row_to_update->username, USERNAME_SIZE);
+    memcpy(row_location + EMAIL_OFFSET, row_to_update->email, EMAIL_SIZE); // same here
+
+    free(cursor);
+    return EXECUTE_SUCCESS;
+}
+
+ExecuteResult execute_delete(Statement *statement, Table *table)
+{
+    Row *row_to_delete = &(statement->row_to_insert);
+    uint32_t row_key = row_to_delete->id;
+    Cursor *cursor = find_table(table, row_key);
+
+    void *node = get_page(cursor->table->pager, cursor->page_num);
+    uint32_t num_cell = *(leaf_node_num_cells(node));
+
+    // Check if the cursor points to a valid cell
+    if (cursor->cell_num >= num_cell)
+    {
+        printf("Error: No row found with id %d\n", row_key);
+        free(cursor);
+        return EXECUTE_NOT_FOUND; // Or define a new error type
+    }
+
+    // Shift all subsequent rows left to fill the gap (for imagination consider it an array of size num_cell)
+    for (uint32_t i = cursor->cell_num; i < num_cell - 1; i++)
+    {
+        memcpy(
+            leaf_node_cell(node, i),     // Destination: current cell
+            leaf_node_cell(node, i + 1), // Source: next cell
+            LEAF_NODE_CELL_SIZE);
+    }
+    // Reduce the count of stored rows
+    (*leaf_node_num_cells(node))--;
+    printf("deleted %d\n", row_key);
     free(cursor);
     return EXECUTE_SUCCESS;
 }
@@ -839,6 +1560,10 @@ ExecuteResult execute_statement(Statement *statement, Table *table)
     {
     case (STATEMENT_INSERT):
         return execute_insert(statement, table);
+    case (STATEMENT_UPDATE):
+        return execute_update(statement, table);
+    case (STATEMENT_DELETE):
+        return execute_delete(statement, table);
     case (STATEMENT_SELECT):
         return execute_select(statement, table);
     }
@@ -896,11 +1621,13 @@ int main(int argc, char *argv[])
         case (EXECUTE_SUCCESS):
             printf("Statement executed.\n");
             break;
+        case (EXECUTE_DUPLICATE_KEY):
+            printf("Duplicate key found.\n");
+            break;
         case (EXECUTE_TABLE_FULL):
             printf("Error Table full.\n");
             break;
         }
     }
-
     return 0;
 }

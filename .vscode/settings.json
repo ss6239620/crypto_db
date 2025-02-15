@@ -17,6 +17,13 @@
         "string_view": "c",
         "format": "c",
         "span": "c",
-        "stdint.h": "c"
+        "stdint.h": "c",
+        "charconv": "c",
+        "compare": "c",
+        "functional": "c",
+        "tuple": "c",
+        "type_traits": "c",
+        "utility": "c",
+        "variant": "c"
     }
 }

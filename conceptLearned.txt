@@ -92,3 +92,32 @@ Reason for switching from unsorted array of rows to a B-Tree:
     Insertion	    O(1)	                O(n)	                O(log(n))
     Deletion	    O(n)	                O(n)	                O(log(n))
     Lookup by id	O(n)	                O(log(n))	            O(log(n))
+
+
+
+How is Btree efficent(in our db):
+    B-Trees, which are commonly used in databases because they minimize the number of disk accesses needed to find a key. The key idea is that B-Trees have a high branching factor, meaning each internal node has many children, which keeps the tree shallow (fewer levels). This results in fewer disk reads to locate data.
+
+    What is a branching factor?
+    A branching factor is the number of children each internal node can have.
+    
+    Why does a high branching factor matter?
+    Since each internal node can have 511 keys and 512 child pointers, the tree doesn't grow deep.
+
+    Example:
+        How Many Nodes Do We Need to Read?
+        Let’s say we are searching for a specific key:
+
+        Read the Root Node (Level 0)
+
+        Contains 511 keys, so we search using binary search (fast).
+        Follow the correct child pointer to an internal node.
+        Read an Internal Node (Level 1)
+
+        Again, contains 511 keys, so we do a binary search and follow a child pointer.
+        Read Another Internal Node (Level 2)
+
+        Same process—search keys and follow a child pointer.
+        Read a Leaf Node (Level 3)
+
+        The actual data is stored here.

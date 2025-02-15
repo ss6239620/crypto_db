@@ -15,3 +15,39 @@
         This can explain why the third row (which might be in a new or untouched part of the page) shows correctly, while earlier rows are corrupted.
 
     Solution: const uint32_t LEAF_NODE_VALUE_SIZE = ROW_SIZE; 
+
+2)Windows CRLF conversions.
+    issue: when i enter any 2 digit id and save it in db and reconnect again i get the error."Db file does not have whole   number pages it is likely corrupted"
+
+    Faulty_code: int fd = open(filename,
+                    O_RDWR |      // Open for reading and writing
+                    O_CREAT | // Create file if it does not exist
+                    S_IWUSR |     // User write permission
+                    S_IRUSR   // User read permission
+                 );
+
+    Reaon for bug: 
+        On Windows, when a file is opened in text mode (the default), each '\n' written is converted to '\r\n', which increases the byte count. If the pager_flush function writes PAGE_SIZE bytes (4096), but the underlying file system adds CRLF conversions, the actual bytes written would be more than 4096, leading to a file size that's not a multiple of PAGE_SIZE.
+
+        binary data (serialized rows), which may contain '\n' characters in the username or email fields. If the file is opened in text mode, those '\n's would be converted to '\r\n', causing the write to actually emit more bytes than PAGE_SIZE. For example, writing 4096 bytes might result in 4096 + x bytes due to CRLF conversions, making the file size incorrect.
+
+    Solution:
+        int fd = open(filename,
+                    O_RDWR |      // Open for reading and writing
+                    O_CREAT | // Create file if it does not exist
+                    O_BINARY, // Binary mode (no CRLF conversions) forgot to include this almost crashed o my windows fuck windows check bug.txt for updates (lol).
+                    S_IWUSR |     // User write permission
+                    S_IRUSR   // User read permission
+    );
+
+3)The issue arises due to incorrect handling of cell indices during leaf node splitting.
+    issue: was not writting first cell 
+    Faulty_code: for (int32_t i = LEAF_NODE_MAX_CELL-1; i >= 0; i--) 
+    Reaon for bug:
+        The leaf_node_split_insert function redistributes cells from the old node to the new node. The loop runs from LEAF_NODE_MAX_CELL - 1 (e.g., 12 for 13 max cells) to 0. However, when inserting a new cell, the total cells become LEAF_NODE_MAX_CELL + 1, requiring precise handling to avoid off-by-one errors.
+
+        During redistribution, cells are assigned to the old or new node based on whether their index is within the left split count. If the new cell's position isn't correctly accounted for, some cells might not be copied properly, leaving gaps filled with uninitialized data.
+
+        The cell with (0, , ) indicates the id is zero, and strings are empty. This suggests the cell wasn't properly written during the split, leaving memory initialized to zero (common with malloc).
+
+    Solution:  for (int32_t i = LEAF_NODE_MAX_CELL; i >= 0; i--)
